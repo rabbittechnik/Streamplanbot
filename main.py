@@ -1,9 +1,10 @@
 import discord
 import os
 import json
+import re
 from discord.ext import commands
 from discord import app_commands
-from datetime import datetime
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -15,19 +16,7 @@ intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 tree = bot.tree
 
-WEEK_OPTIONS = [
-    ("13.05.2025 - 19.05.2025", "13.05.2025", "19.05.2025"),
-    ("20.05.2025 - 26.05.2025", "20.05.2025", "26.05.2025"),
-    ("27.05.2025 - 02.06.2025", "27.05.2025", "02.06.2025")
-]
-
 DAYS = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"]
-TIME_OPTIONS = [
-    ("Kein Stream", "🟥"),
-    ("Eventueller Stream", "🟨"),
-    ("12:00 Uhr", "🟩"), ("14:00 Uhr", "🟩"), ("16:00 Uhr", "🟩"),
-    ("18:00 Uhr", "🟩"), ("20:00 Uhr", "🟩"), ("22:00 Uhr", "🟩")
-]
 
 game_emojis = {
     "fortnite": "🔫",
@@ -52,6 +41,21 @@ game_emojis = {
 user_state = {}
 
 SETTINGS_FILE = "channels.json"
+
+def get_week_options():
+    today = datetime.today()
+    week_options = []
+    # Start: Montag dieser Woche
+    this_monday = today - timedelta(days=today.weekday())
+    for i in range(3):
+        start = this_monday + timedelta(days=i*7)
+        end = start + timedelta(days=6)
+        label = f"{start.strftime('%d.%m.%Y')} - {end.strftime('%d.%m.%Y')}"
+        week_options.append((label, start.strftime('%d.%m.%Y'), end.strftime('%d.%m.%Y')))
+    return week_options
+
+def is_valid_time(timestr):
+    return bool(re.match(r"^(?:[01]\d|2[0-3]):[0-5]\d$", timestr))
 
 def load_channels():
     if os.path.exists(SETTINGS_FILE):
@@ -127,21 +131,23 @@ class FallbackButton(discord.ui.Button):
     async def callback(self, interaction: discord.Interaction):
         await interaction.response.send_modal(FallbackModal())
 
-# ---- Woche wählen usw. ----
+# ---- Woche wählen (dynamisch) ----
 class WeekSelect(discord.ui.Select):
     def __init__(self):
-        options = [discord.SelectOption(label=label, value=label) for label, *_ in WEEK_OPTIONS]
+        week_options = get_week_options()
+        options = [discord.SelectOption(label=label, value=label) for label, *_ in week_options]
         super().__init__(placeholder="Wähle die Woche (vom/bis)", options=options)
 
     async def callback(self, interaction: discord.Interaction):
         user_state[interaction.user.id] = {
             "week": self.values[0],
+            "days": {},
             "times": {},
             "games": {}
         }
         await interaction.response.edit_message(
-            content="Wähle deine Streamzeiten:",
-            view=StreamPlanTimePage1(interaction.user.id)
+            content="Für jeden Tag auswählen: Kein Stream / Eventuell / Stream",
+            view=StreamTypePage(interaction.user.id, page=1)
         )
 
 class WeekView(discord.ui.View):
@@ -149,15 +155,78 @@ class WeekView(discord.ui.View):
         super().__init__(timeout=300)
         self.add_item(WeekSelect())
 
-class TimeSelect(discord.ui.Select):
+# ---- Tages-Auswahl pro Tag (Kein Stream / Eventuell / Stream) ----
+class StreamTypeSelect(discord.ui.Select):
     def __init__(self, user_id, day):
-        self.user_id = user_id
-        options = [discord.SelectOption(label=label) for label, _ in TIME_OPTIONS]
+        options = [
+            discord.SelectOption(label="Kein Stream", value="Kein Stream", emoji="🟥"),
+            discord.SelectOption(label="Eventueller Stream", value="Eventuell", emoji="🟨"),
+            discord.SelectOption(label="Stream", value="Stream", emoji="🟩"),
+        ]
         super().__init__(placeholder=day, options=options)
+        self.user_id = user_id
+        self.day = day
 
     async def callback(self, interaction: discord.Interaction):
-        user_state[self.user_id]["times"][self.placeholder] = self.values[0]
+        user_state[self.user_id]["days"][self.day] = self.values[0]
         await interaction.response.defer()
+
+# ---- Navigation-Button (View-Wechsel) ----
+class NavButton(discord.ui.Button):
+    def __init__(self, label, target_view_func):
+        super().__init__(label=label, style=discord.ButtonStyle.secondary)
+        self.target_view_func = target_view_func
+
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.edit_message(view=self.target_view_func(interaction.user.id))
+
+# ---- Tages-Auswahl-Page (5 Tage pro Seite) ----
+class StreamTypePage(discord.ui.View):
+    def __init__(self, user_id, page=1):
+        super().__init__(timeout=300)
+        days_per_page = 5
+        start_idx = (page-1) * days_per_page
+        end_idx = start_idx + days_per_page
+        self.user_id = user_id
+        self.page = page
+        days = DAYS[start_idx:end_idx]
+        for day in days:
+            self.add_item(StreamTypeSelect(user_id, day))
+        # Navigation Buttons
+        if start_idx > 0:
+            self.add_item(NavButton("⬅️ Zurück", lambda uid: StreamTypePage(uid, page-1)))
+        if end_idx < len(DAYS):
+            self.add_item(NavButton("➡️ Weiter", lambda uid: StreamTypePage(uid, page+1)))
+        else:
+            self.add_item(NavButton("Weiter zu Uhrzeit", lambda uid: StreamTimeInputPage(uid, 1)))
+
+# ---- Uhrzeit-Input (nur für Tage mit „Eventuell“/„Stream“) ----
+class TimeTextModal(discord.ui.Modal):
+    def __init__(self, user_id, day, remaining_days, current_page):
+        super().__init__(title=f"{day} – Uhrzeit eintragen")
+        self.user_id = user_id
+        self.day = day
+        self.remaining_days = remaining_days
+        self.current_page = current_page
+        self.uhrzeit = discord.ui.TextInput(label="Uhrzeit", placeholder="z.B. 18:00", required=True)
+
+        self.add_item(self.uhrzeit)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not is_valid_time(self.uhrzeit.value):
+            await interaction.response.send_message(
+                "❌ Ungültiges Uhrzeit-Format! Bitte als HH:MM (z.B. 18:00) eingeben.", ephemeral=True
+            )
+            return
+        user_state[self.user_id]["times"][self.day] = self.uhrzeit.value
+        # Weiter zur nächsten Zeit oder nächste Seite oder Spieleingabe
+        if self.remaining_days:
+            next_day = self.remaining_days[0]
+            next_remaining = self.remaining_days[1:]
+            await interaction.response.send_modal(TimeTextModal(self.user_id, next_day, next_remaining, self.current_page))
+        else:
+            # Alle Zeiten fertig, jetzt zur Spieleingabe
+            await interaction.response.edit_message(content="Spiele eintragen (optional):", view=GameInputButtonView())
 
 class GameInput(discord.ui.TextInput):
     def __init__(self, day):
@@ -170,7 +239,7 @@ class GameModal(discord.ui.Modal):
         self.user_id = user_id
         self.inputs = []
         for day in DAYS:
-            if user_state[user_id]["times"].get(day, "Kein Stream") != "Kein Stream":
+            if user_state[user_id]["days"].get(day, "Kein Stream") != "Kein Stream":
                 input_field = GameInput(day)
                 self.inputs.append(input_field)
                 self.add_item(input_field)
@@ -180,14 +249,6 @@ class GameModal(discord.ui.Modal):
             user_state[self.user_id]["games"][field.day] = field.value or "?"
         await send_plan_embed(interaction)
 
-class NavButton(discord.ui.Button):
-    def __init__(self, label, target_view):
-        super().__init__(label=label, style=discord.ButtonStyle.secondary)
-        self.target_view = target_view
-
-    async def callback(self, interaction: discord.Interaction):
-        await interaction.response.edit_message(view=self.target_view(interaction.user.id))
-
 class GameInputButton(discord.ui.Button):
     def __init__(self):
         super().__init__(label="Weiter zur Spieleingabe 🎮", style=discord.ButtonStyle.primary)
@@ -195,34 +256,52 @@ class GameInputButton(discord.ui.Button):
     async def callback(self, interaction: discord.Interaction):
         await interaction.response.send_modal(GameModal(interaction.user.id))
 
-class StreamPlanTimePage1(discord.ui.View):
-    def __init__(self, user_id):
+class GameInputButtonView(discord.ui.View):
+    def __init__(self):
         super().__init__(timeout=300)
-        for day in DAYS[:3]:
-            self.add_item(TimeSelect(user_id, day))
-        self.add_item(NavButton("Weiter ➡️", StreamPlanTimePage2))
-
-class StreamPlanTimePage2(discord.ui.View):
-    def __init__(self, user_id):
-        super().__init__(timeout=300)
-        for day in DAYS[3:5]:
-            self.add_item(TimeSelect(user_id, day))
-        self.add_item(NavButton("⬅️ Zurück", StreamPlanTimePage1))
-        self.add_item(NavButton("➡️ Weiter", StreamPlanTimePage3))
-
-class StreamPlanTimePage3(discord.ui.View):
-    def __init__(self, user_id):
-        super().__init__(timeout=300)
-        for day in DAYS[5:]:
-            self.add_item(TimeSelect(user_id, day))
-        self.add_item(NavButton("⬅️ Zurück", StreamPlanTimePage2))
         self.add_item(GameInputButton())
+
+# ---- Zeit-Eingabe-Page (Seitenweise für ausgewählte Tage) ----
+class StreamTimeInputPage(discord.ui.View):
+    def __init__(self, user_id, page=1):
+        super().__init__(timeout=300)
+        selected_days = [d for d, v in user_state[user_id]["days"].items() if v in ("Eventuell", "Stream")]
+        days_per_page = 5
+        start_idx = (page-1)*days_per_page
+        end_idx = start_idx+days_per_page
+        self.user_id = user_id
+        self.page = page
+        self.days = selected_days[start_idx:end_idx]
+        self.remaining_days = selected_days[end_idx:]
+        # Add Buttons to open Modal für jeden Tag
+        for day in self.days:
+            self.add_item(TimeInputButton(user_id, day, self.remaining_days, page))
+        # Navigation
+        if start_idx > 0:
+            self.add_item(NavButton("⬅️ Zurück", lambda uid: StreamTimeInputPage(uid, page-1)))
+        if end_idx < len(selected_days):
+            self.add_item(NavButton("➡️ Weiter", lambda uid: StreamTimeInputPage(uid, page+1)))
+        else:
+            # Wenn keine weiteren Tage, zur Spieleingabe
+            self.add_item(GameInputButton())
+
+class TimeInputButton(discord.ui.Button):
+    def __init__(self, user_id, day, remaining_days, current_page):
+        super().__init__(label=f"{day}: Uhrzeit eintragen", style=discord.ButtonStyle.primary)
+        self.user_id = user_id
+        self.day = day
+        self.remaining_days = remaining_days
+        self.current_page = current_page
+
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(TimeTextModal(self.user_id, self.day, self.remaining_days, self.current_page))
 
 # ---- Embed-Plan senden ----
 async def send_plan_embed(interaction: discord.Interaction):
     data = user_state[interaction.user.id]
     week = data["week"]
-    times = data["times"]
+    days_selection = data["days"]
+    times = data.get("times", {})
     games = data.get("games", {})
 
     embed = discord.Embed(
@@ -237,24 +316,19 @@ async def send_plan_embed(interaction: discord.Interaction):
 
     lines = []
     for day in DAYS:
-        time = times.get(day, "Kein Stream")
+        selection = days_selection.get(day, "Kein Stream")
+        time = times.get(day, "-")
         game = games.get(day, "-")
-
-        emoji = next((e for label, e in TIME_OPTIONS if label == time), "⚪")
-        g = game.lower()
-        game_icon = "🎮"
-        for key, em in game_emojis.items():
-            if key in g:
-                game_icon += " " + em
-                break
-
-        if time == "Kein Stream":
+        emoji = "⚪"
+        if selection == "Kein Stream":
+            emoji = "🟥"
             line = f"{emoji} **{day}** — Kein Stream    🎮 -"
-        elif time == "Eventueller Stream":
-            line = f"{emoji} **{day}** — Eventueller Stream {game_icon} **{game}**"
-        else:
-            line = f"{emoji} **{day}** — {time.ljust(14)} {game_icon} **{game}**"
-
+        elif selection == "Eventuell":
+            emoji = "🟨"
+            line = f"{emoji} **{day}** — Eventueller Stream um **{time if time != '-' else '?'}** 🎮 {game or '-'}"
+        elif selection == "Stream":
+            emoji = "🟩"
+            line = f"{emoji} **{day}** — Stream um **{time if time != '-' else '?'}** 🎮 {game or '-'}"
         lines.append(line)
         lines.append("")  # Leerzeile
 
@@ -277,7 +351,6 @@ async def send_plan_embed(interaction: discord.Interaction):
 @tree.command(name="setup", description="Wähle den Channel, in dem der Bot posten soll (nur Admins!)")
 @app_commands.checks.has_permissions(administrator=True)
 async def setup(interaction: discord.Interaction):
-    # Prüfe auf viele Channels, dann Fallback zu Modal
     if len(interaction.guild.text_channels) <= 25:
         await interaction.response.send_message(
             "Bitte wähle einen Ziel-Channel:",
@@ -297,3 +370,4 @@ async def on_ready():
     print(f"🤖 Bot bereit: {bot.user}")
 
 bot.run(TOKEN)
+
