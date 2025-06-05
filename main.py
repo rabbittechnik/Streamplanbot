@@ -3,7 +3,7 @@ import os
 import json
 from discord.ext import commands
 from discord import app_commands
-from datetime import datetime
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -15,11 +15,18 @@ intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 tree = bot.tree
 
-WEEK_OPTIONS = [
-    ("13.05.2025 - 19.05.2025", "13.05.2025", "19.05.2025"),
-    ("20.05.2025 - 26.05.2025", "20.05.2025", "26.05.2025"),
-    ("27.05.2025 - 02.06.2025", "27.05.2025", "02.06.2025")
-]
+# Dynamisch: Aktuelle + 2 weitere Wochen berechnen
+def get_week_options():
+    today = datetime.now()
+    # Erster Tag (Montag) dieser Woche finden
+    start = today - timedelta(days=today.weekday())
+    week_options = []
+    for i in range(3):
+        ws = start + timedelta(weeks=i)
+        we = ws + timedelta(days=6)
+        week_label = f"{ws.strftime('%d.%m.%Y')} - {we.strftime('%d.%m.%Y')}"
+        week_options.append((week_label, ws.strftime('%d.%m.%Y'), we.strftime('%d.%m.%Y')))
+    return week_options
 
 DAYS = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"]
 TIME_OPTIONS = [
@@ -50,7 +57,6 @@ game_emojis = {
 }
 
 user_state = {}
-
 SETTINGS_FILE = "channels.json"
 
 def load_channels():
@@ -65,13 +71,12 @@ def save_channels(channels):
 
 channels_by_guild = load_channels()
 
-# ---- Channel-Auswahl (Dropdown ODER Fallback) ----
 class ChannelSelect(discord.ui.Select):
     def __init__(self, guild: discord.Guild):
         options = [
             discord.SelectOption(label=ch.name, value=str(ch.id))
             for ch in guild.text_channels
-        ][:25]  # Discord-Limit für Dropdown
+        ][:25]
         super().__init__(placeholder="Wähle den Ziel-Channel aus", options=options, min_values=1, max_values=1)
         self.guild = guild
 
@@ -91,7 +96,6 @@ class FallbackModal(discord.ui.Modal, title="Channel-ID oder Name eingeben"):
         channel_val = self.channel_input.value.strip()
         guild = interaction.guild
         channel = None
-        # Channel per ID oder Name suchen
         if channel_val.isdigit():
             channel = guild.get_channel(int(channel_val))
         if not channel:
@@ -115,7 +119,6 @@ class FallbackModal(discord.ui.Modal, title="Channel-ID oder Name eingeben"):
 class SetupView(discord.ui.View):
     def __init__(self, guild):
         super().__init__(timeout=120)
-        # Fallback-Button anbieten falls zu viele Channels
         if len(guild.text_channels) <= 25:
             self.add_item(ChannelSelect(guild))
         else:
@@ -127,10 +130,11 @@ class FallbackButton(discord.ui.Button):
     async def callback(self, interaction: discord.Interaction):
         await interaction.response.send_modal(FallbackModal())
 
-# ---- Woche wählen usw. ----
+# --- Woche wählen ---
 class WeekSelect(discord.ui.Select):
     def __init__(self):
-        options = [discord.SelectOption(label=label, value=label) for label, *_ in WEEK_OPTIONS]
+        week_options = get_week_options()
+        options = [discord.SelectOption(label=label, value=label) for label, *_ in week_options]
         super().__init__(placeholder="Wähle die Woche (vom/bis)", options=options)
 
     async def callback(self, interaction: discord.Interaction):
@@ -218,7 +222,6 @@ class StreamPlanTimePage3(discord.ui.View):
         self.add_item(NavButton("⬅️ Zurück", StreamPlanTimePage2))
         self.add_item(GameInputButton())
 
-# ---- Embed-Plan senden ----
 async def send_plan_embed(interaction: discord.Interaction):
     data = user_state[interaction.user.id]
     week = data["week"]
@@ -260,7 +263,6 @@ async def send_plan_embed(interaction: discord.Interaction):
 
     embed.description = "\n".join(lines)
 
-    # Sende an den konfigurierten Channel!
     guild_id = str(interaction.guild_id)
     if guild_id in channels_by_guild:
         channel_id = channels_by_guild[guild_id]
@@ -272,12 +274,9 @@ async def send_plan_embed(interaction: discord.Interaction):
 
     await interaction.response.send_message("❌ Ziel-Channel nicht gesetzt! Bitte führe zuerst /setup aus.", ephemeral=True)
 
-# ---- Slash-Commands ----
-
 @tree.command(name="setup", description="Wähle den Channel, in dem der Bot posten soll (nur Admins!)")
 @app_commands.checks.has_permissions(administrator=True)
 async def setup(interaction: discord.Interaction):
-    # Prüfe auf viele Channels, dann Fallback zu Modal
     if len(interaction.guild.text_channels) <= 25:
         await interaction.response.send_message(
             "Bitte wähle einen Ziel-Channel:",
