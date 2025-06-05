@@ -29,7 +29,6 @@ TIME_OPTIONS = [
     ("18:00 Uhr", "🟩"), ("20:00 Uhr", "🟩"), ("22:00 Uhr", "🟩")
 ]
 
-# Spiel-zu-Emoji-Zuordnung
 game_emojis = {
     "fortnite": "🔫",
     "call of duty": "🔫", "cod": "🔫",
@@ -52,7 +51,6 @@ game_emojis = {
 
 user_state = {}
 
-# ---- Channel-Einstellung speichern und laden ----
 SETTINGS_FILE = "channels.json"
 
 def load_channels():
@@ -67,13 +65,13 @@ def save_channels(channels):
 
 channels_by_guild = load_channels()
 
-# ---- Setup-View ----
+# ---- Channel-Auswahl (Dropdown ODER Fallback) ----
 class ChannelSelect(discord.ui.Select):
     def __init__(self, guild: discord.Guild):
         options = [
             discord.SelectOption(label=ch.name, value=str(ch.id))
             for ch in guild.text_channels
-        ]
+        ][:25]  # Discord-Limit für Dropdown
         super().__init__(placeholder="Wähle den Ziel-Channel aus", options=options, min_values=1, max_values=1)
         self.guild = guild
 
@@ -86,10 +84,48 @@ class ChannelSelect(discord.ui.Select):
             ephemeral=True
         )
 
+class FallbackModal(discord.ui.Modal, title="Channel-ID oder Name eingeben"):
+    channel_input = discord.ui.TextInput(label="Channel-ID oder exakter Name", required=True)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        channel_val = self.channel_input.value.strip()
+        guild = interaction.guild
+        channel = None
+        # Channel per ID oder Name suchen
+        if channel_val.isdigit():
+            channel = guild.get_channel(int(channel_val))
+        if not channel:
+            for ch in guild.text_channels:
+                if ch.name == channel_val:
+                    channel = ch
+                    break
+        if channel:
+            channels_by_guild[str(guild.id)] = channel.id
+            save_channels(channels_by_guild)
+            await interaction.response.send_message(
+                f"✅ Channel wurde gespeichert! Streampläne werden ab jetzt in <#{channel.id}> ({channel.mention}) gepostet.",
+                ephemeral=True
+            )
+        else:
+            await interaction.response.send_message(
+                "❌ Channel nicht gefunden! Bitte nochmal exakt angeben.",
+                ephemeral=True
+            )
+
 class SetupView(discord.ui.View):
     def __init__(self, guild):
         super().__init__(timeout=120)
-        self.add_item(ChannelSelect(guild))
+        # Fallback-Button anbieten falls zu viele Channels
+        if len(guild.text_channels) <= 25:
+            self.add_item(ChannelSelect(guild))
+        else:
+            self.add_item(FallbackButton())
+
+class FallbackButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(label="Channel per Name/ID eingeben", style=discord.ButtonStyle.primary)
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(FallbackModal())
 
 # ---- Woche wählen usw. ----
 class WeekSelect(discord.ui.Select):
@@ -224,7 +260,7 @@ async def send_plan_embed(interaction: discord.Interaction):
 
     embed.description = "\n".join(lines)
 
-    # Hier: Sende an den konfigurierten Channel!
+    # Sende an den konfigurierten Channel!
     guild_id = str(interaction.guild_id)
     if guild_id in channels_by_guild:
         channel_id = channels_by_guild[guild_id]
@@ -241,11 +277,15 @@ async def send_plan_embed(interaction: discord.Interaction):
 @tree.command(name="setup", description="Wähle den Channel, in dem der Bot posten soll (nur Admins!)")
 @app_commands.checks.has_permissions(administrator=True)
 async def setup(interaction: discord.Interaction):
-    await interaction.response.send_message(
-        "Bitte wähle einen Ziel-Channel:",
-        view=SetupView(interaction.guild),
-        ephemeral=True
-    )
+    # Prüfe auf viele Channels, dann Fallback zu Modal
+    if len(interaction.guild.text_channels) <= 25:
+        await interaction.response.send_message(
+            "Bitte wähle einen Ziel-Channel:",
+            view=SetupView(interaction.guild),
+            ephemeral=True
+        )
+    else:
+        await interaction.response.send_modal(FallbackModal())
 
 @tree.command(name="streamplan", description="Erstelle deinen wöchentlichen Streamplan")
 async def streamplan(interaction: discord.Interaction):
