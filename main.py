@@ -180,11 +180,11 @@ class NavButton(discord.ui.Button):
     async def callback(self, interaction: discord.Interaction):
         await interaction.response.edit_message(view=self.target_view_func(interaction.user.id))
 
-# ---- Tages-Auswahl-Page (5 Tage pro Seite) ----
+# ---- Tages-Auswahl-Page (3 Tage pro Seite) ----
 class StreamTypePage(discord.ui.View):
     def __init__(self, user_id, page=1):
         super().__init__(timeout=300)
-        days_per_page = 5
+        days_per_page = 3  # Maximal 3 Selects, dann können 2 Buttons dazu!
         start_idx = (page-1) * days_per_page
         end_idx = start_idx + days_per_page
         self.user_id = user_id
@@ -192,7 +192,7 @@ class StreamTypePage(discord.ui.View):
         days = DAYS[start_idx:end_idx]
         for day in days:
             self.add_item(StreamTypeSelect(user_id, day))
-        # Navigation Buttons
+        # Navigation Buttons (maximal 2 Buttons)
         if start_idx > 0:
             self.add_item(NavButton("⬅️ Zurück", lambda uid: StreamTypePage(uid, page-1)))
         if end_idx < len(DAYS):
@@ -202,14 +202,12 @@ class StreamTypePage(discord.ui.View):
 
 # ---- Uhrzeit-Input (nur für Tage mit „Eventuell“/„Stream“) ----
 class TimeTextModal(discord.ui.Modal):
-    def __init__(self, user_id, day, remaining_days, current_page):
+    def __init__(self, user_id, day, remaining_days):
         super().__init__(title=f"{day} – Uhrzeit eintragen")
         self.user_id = user_id
         self.day = day
         self.remaining_days = remaining_days
-        self.current_page = current_page
         self.uhrzeit = discord.ui.TextInput(label="Uhrzeit", placeholder="z.B. 18:00", required=True)
-
         self.add_item(self.uhrzeit)
 
     async def on_submit(self, interaction: discord.Interaction):
@@ -223,7 +221,7 @@ class TimeTextModal(discord.ui.Modal):
         if self.remaining_days:
             next_day = self.remaining_days[0]
             next_remaining = self.remaining_days[1:]
-            await interaction.response.send_modal(TimeTextModal(self.user_id, next_day, next_remaining, self.current_page))
+            await interaction.response.send_modal(TimeTextModal(self.user_id, next_day, next_remaining))
         else:
             # Alle Zeiten fertig, jetzt zur Spieleingabe
             await interaction.response.edit_message(content="Spiele eintragen (optional):", view=GameInputButtonView())
@@ -261,12 +259,12 @@ class GameInputButtonView(discord.ui.View):
         super().__init__(timeout=300)
         self.add_item(GameInputButton())
 
-# ---- Zeit-Eingabe-Page (Seitenweise für ausgewählte Tage) ----
+# ---- Zeit-Eingabe-Page (Seitenweise für ausgewählte Tage, 3 pro Seite) ----
 class StreamTimeInputPage(discord.ui.View):
     def __init__(self, user_id, page=1):
         super().__init__(timeout=300)
         selected_days = [d for d, v in user_state[user_id]["days"].items() if v in ("Eventuell", "Stream")]
-        days_per_page = 5
+        days_per_page = 3
         start_idx = (page-1)*days_per_page
         end_idx = start_idx+days_per_page
         self.user_id = user_id
@@ -275,26 +273,24 @@ class StreamTimeInputPage(discord.ui.View):
         self.remaining_days = selected_days[end_idx:]
         # Add Buttons to open Modal für jeden Tag
         for day in self.days:
-            self.add_item(TimeInputButton(user_id, day, self.remaining_days, page))
+            self.add_item(TimeInputButton(user_id, day, self.remaining_days))
         # Navigation
         if start_idx > 0:
             self.add_item(NavButton("⬅️ Zurück", lambda uid: StreamTimeInputPage(uid, page-1)))
         if end_idx < len(selected_days):
             self.add_item(NavButton("➡️ Weiter", lambda uid: StreamTimeInputPage(uid, page+1)))
-        else:
-            # Wenn keine weiteren Tage, zur Spieleingabe
+        elif selected_days:  # Zeige Spieleingabe-Button, wenn Tage übrig waren
             self.add_item(GameInputButton())
 
 class TimeInputButton(discord.ui.Button):
-    def __init__(self, user_id, day, remaining_days, current_page):
+    def __init__(self, user_id, day, remaining_days):
         super().__init__(label=f"{day}: Uhrzeit eintragen", style=discord.ButtonStyle.primary)
         self.user_id = user_id
         self.day = day
         self.remaining_days = remaining_days
-        self.current_page = current_page
 
     async def callback(self, interaction: discord.Interaction):
-        await interaction.response.send_modal(TimeTextModal(self.user_id, self.day, self.remaining_days, self.current_page))
+        await interaction.response.send_modal(TimeTextModal(self.user_id, self.day, self.remaining_days))
 
 # ---- Embed-Plan senden ----
 async def send_plan_embed(interaction: discord.Interaction):
@@ -370,4 +366,3 @@ async def on_ready():
     print(f"🤖 Bot bereit: {bot.user}")
 
 bot.run(TOKEN)
-
